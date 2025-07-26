@@ -1,0 +1,14 @@
+{
+  "name": "netfend/waf-client",
+  "description": "PHP WAF Client Library for secure API validation",
+  "type": "library",
+  "license": "MIT",
+  "autoload": {
+    "psr-4": {
+      "Netfend\\WAFClient\\": "src/"
+    }
+  },
+  "require": {
+    "php": "^8.0"
+  }
+}
