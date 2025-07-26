@@ -1,6 +1,6 @@
 <?php
 
-namespace NetFend\WAFClient;
+namespace NetFend\WAF;
 /**
  * WAF Client SDK - Enhanced Version with Custom Protection Settings (PHP)
  * Converted from Node.js version - handles 403 responses from WAF server
