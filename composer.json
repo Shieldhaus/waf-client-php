@@ -1,5 +1,6 @@
 {
   "name": "netfend/waf-client",
+  "version": "1.0.2",
   "description": "PHP WAF Client Library for secure API validation",
   "type": "library",
   "license": "MIT",

@@ -3,9 +3,9 @@
 namespace NetFend\WAFClient;
 
 /**
- * WAF Client SDK - Enhanced Version with Cached Configuration System (PHP)
+ * WAF Client SDK - FULLY DYNAMIC Version (PHP)
  * Fetches and caches configurations from /v1/user/me endpoint
- * Converted from Node.js version with full configuration synchronization
+ * COMPLETELY DYNAMIC - No hardcoded protection names, accepts ANY protection from API
  */
 
 class WAFClient
@@ -17,6 +17,7 @@ class WAFClient
     private int $lastConfigFetch = 0;
     private int $configRefreshInterval;
     private int $configTimeout;
+    private array $discoveredProtections = [];
 
     public function __construct(array $options = [])
     {
@@ -27,7 +28,7 @@ class WAFClient
         $this->configRefreshInterval = $options['configRefreshInterval'] ?? 10000; // 10 seconds
         $this->configTimeout = $options['configTimeout'] ?? 5000;
 
-        // Initialize fallback configuration
+        // Fallback configuration (used if API is unavailable) - NO HARDCODED PROTECTIONS
         $this->config = [
             'apiKey' => $options['apiKey'],
             'configEndpoint' => $options['configEndpoint'] ?? 'https://graphnet.emailsbit.com/waf/v1/user/me',
@@ -38,15 +39,10 @@ class WAFClient
             'logRequests' => $options['logRequests'] ?? false,
             'responseType' => $options['responseType'] ?? 'rest',
             'onWafError' => $options['onWafError'] ?? 'allow',
-            'protections' => [
-                'xss' => ['enabled' => $options['protections']['xss']['enabled'] ?? true],
-                'sqlInjection' => ['enabled' => $options['protections']['sqlInjection']['enabled'] ?? true],
-                'rce' => ['enabled' => $options['protections']['rce']['enabled'] ?? true],
-                'pathTraversal' => ['enabled' => $options['protections']['pathTraversal']['enabled'] ?? true],
-                'maliciousHeaders' => ['enabled' => $options['protections']['maliciousHeaders']['enabled'] ?? true],
-                'fileUpload' => ['enabled' => $options['protections']['fileUpload']['enabled'] ?? true],
-                'ipCheck' => ['enabled' => $options['protections']['ipCheck']['enabled'] ?? true],
-            ],
+            
+            // DYNAMIC protections - empty by default, populated from API
+            'protections' => [], // Will be populated dynamically from API
+            
             'validatedMethods' => $options['validatedMethods'] ?? ['POST', 'PUT', 'PATCH', 'DELETE'],
             'ignoredPaths' => $options['ignoredPaths'] ?? ['/health'],
             'enableCache' => $options['enableCache'] ?? true,
@@ -55,7 +51,6 @@ class WAFClient
         ];
 
         $this->configCache = $this->config; // Set fallback config initially
-        $this->validateProtectionSettings();
         $this->initializeConfig();
         $this->startCacheCleaner();
     }
@@ -107,7 +102,7 @@ class WAFClient
 
             $wafSetting = $responseData['wafSetting'];
 
-            // Transform API response to internal config format
+            // Transform API response to internal config format - FULLY DYNAMIC
             $newConfig = [
                 'apiKey' => $this->config['apiKey'],
                 'configEndpoint' => $this->config['configEndpoint'],
@@ -119,19 +114,13 @@ class WAFClient
                 'onWafError' => $wafSetting['onWafError'] ?? $this->config['onWafError'],
                 'timeout' => $wafSetting['timeout'] ?? $this->config['timeout'],
                 'cacheTimeout' => $wafSetting['cacheTimeout'] ?? $this->config['cacheTimeout'],
-                'protections' => [
-                    'xss' => ['enabled' => $wafSetting['protections']['xss']['enabled'] ?? $this->config['protections']['xss']['enabled']],
-                    'sqlInjection' => ['enabled' => $wafSetting['protections']['sqlInjection']['enabled'] ?? $this->config['protections']['sqlInjection']['enabled']],
-                    'rce' => ['enabled' => $wafSetting['protections']['rce']['enabled'] ?? $this->config['protections']['rce']['enabled']],
-                    'pathTraversal' => ['enabled' => $wafSetting['protections']['pathTraversal']['enabled'] ?? $this->config['protections']['pathTraversal']['enabled']],
-                    'maliciousHeaders' => ['enabled' => $wafSetting['protections']['maliciousHeaders']['enabled'] ?? $this->config['protections']['maliciousHeaders']['enabled']],
-                    'fileUpload' => ['enabled' => $wafSetting['protections']['fileUpload']['enabled'] ?? $this->config['protections']['fileUpload']['enabled']],
-                    'ipCheck' => ['enabled' => $wafSetting['protections']['ipCheck']['enabled'] ?? $this->config['protections']['ipCheck']['enabled']],
-                ],
-                'validatedMethods' => array_keys(array_filter(
-                    $wafSetting['validatedMethods'] ?? array_combine($this->config['validatedMethods'], array_fill(0, count($this->config['validatedMethods']), true)),
-                    fn($enabled) => $enabled
-                )),
+                
+                // DYNAMIC protections - accept ANY protection from API
+                'protections' => $this->transformProtectionsDynamically($wafSetting['protections'] ?? []),
+                
+                // Transform validatedMethods from object to array
+                'validatedMethods' => $this->transformValidatedMethods($wafSetting['validatedMethods'] ?? []),
+                
                 'ignoredPaths' => $wafSetting['ignoredPaths'] ?? $this->config['ignoredPaths'],
                 'configFetchedAt' => date('c'),
                 'configUpdatedAt' => $wafSetting['updatedAt'] ?? date('c'),
@@ -148,9 +137,10 @@ class WAFClient
                 $this->lastConfigFetch = time() * 1000;
 
                 if ($this->configCache['logRequests']) {
+                    $enabledProtections = array_keys(array_filter($newConfig['protections'], fn($p) => $p['enabled']));
                     error_log('🔄 [WAF Client] Configuration updated: ' . json_encode([
                         'enabled' => $newConfig['enabled'],
-                        'protections' => array_keys(array_filter($newConfig['protections'], fn($p) => $p['enabled'])),
+                        'protections' => $enabledProtections,
                         'validatedMethods' => $newConfig['validatedMethods'],
                         'ignoredPaths' => count($newConfig['ignoredPaths']),
                         'responseType' => $newConfig['responseType'],
@@ -188,6 +178,103 @@ class WAFClient
         }
     }
 
+    /**
+     * Transform API response protections to internal format - FULLY DYNAMIC
+     * Accepts ANY protection type returned by the API, no hardcoded names
+     */
+    private function transformProtectionsDynamically(array $apiProtections): array
+    {
+        $transformedProtections = [];
+        
+        if (empty($apiProtections) || !is_array($apiProtections)) {
+            error_log('⚠️  [WAF Client] No protections received from API, using empty config');
+            return [];
+        }
+        
+        // Process ALL protections from API response dynamically
+        foreach ($apiProtections as $protectionName => $config) {
+            // Validate and normalize the protection configuration
+            $normalizedConfig = $this->normalizeProtectionConfig($config, $protectionName);
+            $transformedProtections[$protectionName] = $normalizedConfig;
+            
+            // Track new protections for informational purposes
+            if (!in_array($protectionName, $this->discoveredProtections)) {
+                $this->discoveredProtections[] = $protectionName;
+                
+                error_log("🆕 [WAF Client] New protection discovered: {$protectionName} - " . json_encode([
+                    'enabled' => $normalizedConfig['enabled'],
+                    'config' => $normalizedConfig
+                ]));
+            }
+        }
+        
+        return $transformedProtections;
+    }
+
+    /**
+     * Normalize protection configuration to ensure consistent structure
+     * Handles various possible config formats from the API
+     */
+    private function normalizeProtectionConfig($config, string $protectionName): array
+    {
+        // Handle boolean format
+        if (is_bool($config)) {
+            return ['enabled' => $config];
+        }
+        
+        // Handle object format
+        if (is_array($config)) {
+            $normalized = [
+                'enabled' => $config['enabled'] ?? true, // Default to true if not explicitly false
+            ];
+            
+            // Preserve any additional properties from API
+            foreach ($config as $key => $value) {
+                if ($key !== 'enabled') {
+                    $normalized[$key] = $value;
+                }
+            }
+            
+            // Ensure enabled is always a boolean
+            if (!is_bool($normalized['enabled'])) {
+                error_log("⚠️  [WAF Client] Invalid enabled value for {$protectionName}: {$normalized['enabled']}, defaulting to true");
+                $normalized['enabled'] = true;
+            }
+            
+            return $normalized;
+        }
+        
+        // Handle unexpected formats
+        error_log("⚠️  [WAF Client] Unexpected config format for {$protectionName}: " . json_encode($config) . ', defaulting to enabled: true');
+        return ['enabled' => true];
+    }
+
+    /**
+     * Transform validatedMethods from object to array format
+     */
+    private function transformValidatedMethods($validatedMethods): array
+    {
+        if (is_array($validatedMethods) && !empty($validatedMethods)) {
+            // If it's an object with method => boolean format
+            if ($this->isAssociativeArray($validatedMethods)) {
+                return array_keys(array_filter($validatedMethods, fn($enabled) => $enabled));
+            }
+            // If it's already an array of methods
+            return array_map('strtoupper', $validatedMethods);
+        }
+        
+        // Fallback to default methods
+        return $this->config['validatedMethods'];
+    }
+
+    /**
+     * Check if array is associative (object-like)
+     */
+    private function isAssociativeArray(array $array): bool
+    {
+        return array_keys($array) !== range(0, count($array) - 1);
+    }
+
     private function getConfigChanges(array $oldConfig, array $newConfig): array
     {
         $changes = [];
@@ -200,16 +287,25 @@ class WAFClient
             $changes[] = "responseType: {$oldConfig['responseType']} → {$newConfig['responseType']}";
         }
 
+        // Check protection changes - DYNAMIC
         foreach ($newConfig['protections'] as $protection => $config) {
-            if ($oldConfig['protections'][$protection]['enabled'] !== $config['enabled']) {
-                $changes[] = "$protection: {$oldConfig['protections'][$protection]['enabled']} → {$config['enabled']}";
+            $oldEnabled = $oldConfig['protections'][$protection]['enabled'] ?? false;
+            if ($oldEnabled !== $config['enabled']) {
+                $changes[] = "{$protection}: {$oldEnabled} → {$config['enabled']}";
+            }
+        }
+
+        // Check for removed protections
+        foreach ($oldConfig['protections'] as $protection => $config) {
+            if (!isset($newConfig['protections'][$protection])) {
+                $changes[] = "{$protection}: removed";
             }
         }
 
         $oldMethods = implode(',', $oldConfig['validatedMethods']);
         $newMethods = implode(',', $newConfig['validatedMethods']);
         if ($oldMethods !== $newMethods) {
-            $changes[] = "validatedMethods: [$oldMethods] → [$newMethods]";
+            $changes[] = "validatedMethods: [{$oldMethods}] → [{$newMethods}]";
         }
 
         return $changes ?: ['no_changes'];
@@ -228,22 +324,6 @@ class WAFClient
     public function getCurrentConfig(): array
     {
         return $this->configCache ?? $this->config;
-    }
-
-    private function validateProtectionSettings(): void
-    {
-        $validProtections = ['xss', 'sqlInjection', 'rce', 'pathTraversal', 'maliciousHeaders', 'fileUpload', 'ipCheck'];
-
-        foreach ($this->config['protections'] as $key => $value) {
-            if (!in_array($key, $validProtections)) {
-                error_log("⚠️  [WAF Client] Unknown protection type: {$key}. Valid types: " . implode(', ', $validProtections));
-            }
-
-            if (!is_bool($value['enabled'])) {
-                error_log("⚠️  [WAF Client] Protection {$key}.enabled must be boolean, got " . gettype($value['enabled']));
-                $this->config['protections'][$key]['enabled'] = true;
-            }
-        }
     }
 
     private function shouldIgnorePath(string $path): bool
@@ -279,7 +359,7 @@ class WAFClient
                 'content-type' => $req['headers']['Content-Type'] ?? ''
             ],
             'protections' => $config['protections'],
-            'configHash' => md5(json_encode($config))
+            'configHash' => substr(md5(json_encode($config)), 0, 8)
         ];
 
         return md5(json_encode($data));
@@ -330,13 +410,15 @@ class WAFClient
             }
         }
 
-        $rateLimitWindow = $config['rateLimitWindow'];
-        foreach ($this->rateLimitMap as $ip => $requests) {
-            $validRequests = array_filter($requests, fn($timestamp) => $now - $timestamp < $rateLimitWindow);
-            if (empty($validRequests)) {
-                unset($this->rateLimitMap[$ip]);
-            } else {
-                $this->rateLimitMap[$ip] = array_values($validRequests);
+        if (isset($config['rateLimitWindow'])) {
+            $rateLimitWindow = $config['rateLimitWindow'];
+            foreach ($this->rateLimitMap as $ip => $requests) {
+                $validRequests = array_filter($requests, fn($timestamp) => $now - $timestamp < $rateLimitWindow);
+                if (empty($validRequests)) {
+                    unset($this->rateLimitMap[$ip]);
+                } else {
+                    $this->rateLimitMap[$ip] = array_values($validRequests);
+                }
             }
         }
     }
@@ -358,7 +440,10 @@ class WAFClient
                 'timestamp' => date('c'),
                 'clientIp' => $clientIp,
                 'userAgent' => $req['headers']['User-Agent'] ?? '',
+                
+                // Send current protection settings to server
                 'protections' => $config['protections'],
+                
                 'clientInfo' => [
                     'apiKey' => $config['apiKey'],
                     'version' => '2.1.0',
@@ -575,7 +660,8 @@ class WAFClient
             'configAge' => isset($config['configFetchedAt']) ?
                 round((time() * 1000 - strtotime($config['configFetchedAt']) * 1000) / 1000) : null,
             'lastConfigUpdate' => $config['configUpdatedAt'] ?? null,
-            'refreshInterval' => $this->configRefreshInterval / 1000 . 's'
+            'refreshInterval' => $this->configRefreshInterval / 1000 . 's',
+            'discoveredProtections' => count($this->discoveredProtections)
         ];
     }
 
@@ -736,9 +822,45 @@ class WAFClient
     {
         $this->cache = [];
         $this->rateLimitMap = [];
+        $this->discoveredProtections = [];
 
         if ($this->getCurrentConfig()['logRequests']) {
             error_log('🛑 [WAF Client] Client destroyed and cleaned up');
         }
+    }
+
+    /**
+     * Get list of all discovered protection types
+     */
+    public function getDiscoveredProtections(): array
+    {
+        return $this->discoveredProtections;
+    }
+
+    /**
+     * Check if a specific protection is enabled
+     */
+    public function isProtectionEnabled(string $protectionName): bool
+    {
+        $config = $this->getCurrentConfig();
+        return isset($config['protections'][$protectionName]) && 
+               $config['protections'][$protectionName]['enabled'];
+    }
+
+    /**
+     * Get protection configuration for a specific protection
+     */
+    public function getProtectionConfig(string $protectionName): ?array
+    {
+        $config = $this->getCurrentConfig();
+        return $config['protections'][$protectionName] ?? null;
+    }
+
+    /**
+     * Force configuration refresh
+     */
+    public function refreshConfiguration(): array
+    {
+        return $this->fetchConfiguration();
     }
 }
